@@ -14,6 +14,7 @@ import { DimensionBadge } from './components/DimensionBadge.tsx';
 import { CustomGlbModal } from './components/CustomGlbModal.tsx';
 import { SnapshotModal } from './components/SnapshotModal.tsx';
 import { GuideModal } from './components/GuideModal.tsx';
+import { MobileQrModal } from './components/MobileQrModal.tsx';
 import { INITIAL_CATALOG, instantiateModel } from './models/catalog.ts';
 import { FurnitureModelDef, PlacedFurniture, ViewMode, ActiveTab } from './types.ts';
 import { applyColorToModel } from './models/glbLoader.ts';
@@ -49,6 +50,7 @@ export default function App() {
   // Modals
   const [isGlbModalOpen, setIsGlbModalOpen] = useState<boolean>(false);
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
+  const [isMobileQrOpen, setIsMobileQrOpen] = useState<boolean>(false);
   const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
 
   // Initialize Three.js AR Scene
@@ -322,6 +324,7 @@ export default function App() {
         onToggleTorch={toggleTorch}
         onToggleFacingMode={toggleFacingMode}
         onOpenGlbModal={() => setIsGlbModalOpen(true)}
+        onOpenMobileQr={() => setIsMobileQrOpen(true)}
         onCaptureSnapshot={handleCaptureSnapshot}
         onOpenGuide={() => setIsGuideOpen(true)}
       />
@@ -372,6 +375,12 @@ export default function App() {
       <GuideModal
         isOpen={isGuideOpen}
         onClose={() => setIsGuideOpen(false)}
+      />
+
+      {/* 9. Test on Mobile & Vercel Guide Modal */}
+      <MobileQrModal
+        isOpen={isMobileQrOpen}
+        onClose={() => setIsMobileQrOpen(false)}
       />
     </div>
   );

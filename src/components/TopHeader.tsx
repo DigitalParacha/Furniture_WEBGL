@@ -15,6 +15,8 @@ import {
   SlidersHorizontal,
   Layers,
   Box,
+  Smartphone,
+  QrCode,
 } from 'lucide-react';
 import { ViewMode } from '../types.ts';
 import { CameraStatus } from '../hooks/useCamera.ts';
@@ -29,6 +31,7 @@ interface TopHeaderProps {
   onToggleTorch: () => void;
   onToggleFacingMode: () => void;
   onOpenGlbModal: () => void;
+  onOpenMobileQr: () => void;
   onCaptureSnapshot: () => void;
   onOpenGuide: () => void;
 }
@@ -43,6 +46,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   onToggleTorch,
   onToggleFacingMode,
   onOpenGlbModal,
+  onOpenMobileQr,
   onCaptureSnapshot,
   onOpenGuide,
 }) => {
@@ -126,6 +130,16 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             {isTorchOn ? <Zap className="w-4 h-4" /> : <ZapOff className="w-4 h-4" />}
           </button>
         )}
+
+        {/* Test on Phone button */}
+        <button
+          onClick={onOpenMobileQr}
+          title="Test on Phone via QR code or Vercel"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-700/80 text-cyan-300 font-medium text-xs shadow-md backdrop-blur-md transition-all cursor-pointer"
+        >
+          <Smartphone className="w-4 h-4 text-cyan-400" />
+          <span className="hidden sm:inline">Test on Phone</span>
+        </button>
 
         {/* Snapshot / Photo capture button */}
         <button
