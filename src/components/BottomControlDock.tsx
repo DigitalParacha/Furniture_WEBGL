@@ -8,7 +8,6 @@ import {
   Armchair,
   Layers,
   RotateCw,
-  RotateCcw,
   Sliders,
   Trash2,
   Copy,
@@ -24,8 +23,19 @@ import {
   Box,
   Eye,
   Camera,
+  Lock,
+  Unlock,
+  Target,
+  CheckCircle2,
 } from 'lucide-react';
-import { FurnitureModelDef, PlacedFurniture, ViewMode, ActiveTab, FurnitureCategory } from '../types.ts';
+import {
+  FurnitureModelDef,
+  PlacedFurniture,
+  ViewMode,
+  ActiveTab,
+  FurnitureCategory,
+  PlaneDetectionState,
+} from '../types.ts';
 import { COLOR_PALETTES } from '../models/catalog.ts';
 
 interface BottomControlDockProps {
@@ -36,16 +46,23 @@ interface BottomControlDockProps {
   viewMode: ViewMode;
   showGrid: boolean;
   lightIntensity: number;
+  planeState: PlaneDetectionState;
+  groundDistance: number;
+  floorElevation: number;
+  activeCatalogModel: FurnitureModelDef | null;
   onSelectItemToSpawn: (modelDef: FurnitureModelDef) => void;
+  onPlaceAtReticle: () => void;
   onOpenGlbModal: () => void;
   onRotateDegrees: (degrees: number) => void;
   onSetRotationRadians: (radians: number) => void;
   onScaleChange: (scale: number) => void;
   onElevationChange: (elevation: number) => void;
+  onFloorElevationChange: (elevation: number) => void;
   onColorChange: (colorHex: string) => void;
   onDuplicateItem: () => void;
   onDeleteItem: () => void;
   onDeselectItem: () => void;
+  onToggleLockItem: () => void;
   onToggleViewMode: () => void;
   onToggleGrid: () => void;
   onLightIntensityChange: (intensity: number) => void;
@@ -61,16 +78,23 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
   viewMode,
   showGrid,
   lightIntensity,
+  planeState,
+  groundDistance,
+  floorElevation,
+  activeCatalogModel,
   onSelectItemToSpawn,
+  onPlaceAtReticle,
   onOpenGlbModal,
   onRotateDegrees,
   onSetRotationRadians,
   onScaleChange,
   onElevationChange,
+  onFloorElevationChange,
   onColorChange,
   onDuplicateItem,
   onDeleteItem,
   onDeselectItem,
+  onToggleLockItem,
   onToggleViewMode,
   onToggleGrid,
   onLightIntensityChange,
@@ -100,6 +124,27 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
         maxWidth: 'min(920px, 95vw)',
       }}
     >
+      {/* 0. Ground Plane Detection Indicator & Place at Reticle CTA Button */}
+      <div className="pointer-events-auto mb-2 flex items-center gap-2">
+        {planeState === 'locked' ? (
+          <button
+            onClick={onPlaceAtReticle}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-cyan-500 via-sky-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-xs shadow-xl shadow-cyan-500/25 transition-all cursor-pointer border border-cyan-300/40 active:scale-95"
+          >
+            <Target className="w-4 h-4 text-cyan-100" />
+            <span>Place {activeCatalogModel?.name || 'Selected Furniture'} Here</span>
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-black/30 text-cyan-200 font-mono">
+              {groundDistance}m
+            </span>
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-zinc-900/90 text-zinc-300 text-xs border border-zinc-700/80 shadow-lg backdrop-blur-md">
+            <span className="w-2 h-2 rounded-full bg-amber-400" />
+            <span>Aim phone towards floor to detect ground surface</span>
+          </div>
+        )}
+      </div>
+
       {/* 1. Collapse / Expand Drawer Toggle Tab */}
       <div className="pointer-events-auto mb-1">
         <button
@@ -134,7 +179,7 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
               }`}
             >
               <Armchair className="w-3.5 h-3.5" />
-              <span>Furniture Catalog</span>
+              <span>Catalog</span>
             </button>
 
             <button
@@ -146,7 +191,7 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
               }`}
             >
               <Sliders className="w-3.5 h-3.5" />
-              <span>Transform & Style</span>
+              <span>Transform & Lock</span>
               {selectedItem && (
                 <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
               )}
@@ -161,7 +206,7 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
               }`}
             >
               <Compass className="w-3.5 h-3.5" />
-              <span>Room & AR</span>
+              <span>Ground & AR</span>
             </button>
           </div>
 
@@ -221,34 +266,41 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
               </button>
 
               {/* Catalog Items */}
-              {filteredCatalog.map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => onSelectItemToSpawn(item)}
-                  className="shrink-0 w-44 rounded-xl border border-zinc-800 hover:border-zinc-700 bg-zinc-950/50 hover:bg-zinc-800/50 p-2.5 flex flex-col text-left transition-all cursor-pointer group"
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">
-                      {item.category}
-                    </span>
-                    {item.isCustomGlb && (
-                      <span className="text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300">
-                        Custom
+              {filteredCatalog.map((item) => {
+                const isSelectedForSpawn = activeCatalogModel?.id === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => onSelectItemToSpawn(item)}
+                    className={`shrink-0 w-44 rounded-xl border p-2.5 flex flex-col text-left transition-all cursor-pointer group ${
+                      isSelectedForSpawn
+                        ? 'border-cyan-400 bg-cyan-950/30'
+                        : 'border-zinc-800 hover:border-zinc-700 bg-zinc-950/50 hover:bg-zinc-800/50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">
+                        {item.category}
                       </span>
-                    )}
-                  </div>
-                  <div className="text-xs font-semibold text-zinc-100 group-hover:text-cyan-400 transition-colors line-clamp-1">
-                    {item.name}
-                  </div>
-                  <div className="text-[10px] text-zinc-400 mt-0.5 line-clamp-1">
-                    {item.defaultDimensions.width}m × {item.defaultDimensions.depth}m
-                  </div>
-                  <div className="mt-2 pt-2 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-cyan-400 font-medium">
-                    <span>Tap to place</span>
-                    <Plus className="w-3.5 h-3.5" />
-                  </div>
-                </button>
-              ))}
+                      {isSelectedForSpawn && (
+                        <span className="text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-cyan-500 text-zinc-950">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs font-semibold text-zinc-100 group-hover:text-cyan-400 transition-colors line-clamp-1">
+                      {item.name}
+                    </div>
+                    <div className="text-[10px] text-zinc-400 mt-0.5 line-clamp-1">
+                      {item.defaultDimensions.width}m × {item.defaultDimensions.depth}m
+                    </div>
+                    <div className="mt-2 pt-2 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-cyan-400 font-medium">
+                      <span>Place on floor</span>
+                      <Plus className="w-3.5 h-3.5" />
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
@@ -261,7 +313,7 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
                 <Box className="w-6 h-6 text-zinc-600" />
                 <p>No furniture item selected.</p>
                 <p className="text-[11px] text-zinc-500">
-                  Tap any 3D model on the floor to adjust rotation, scale, elevation, and color.
+                  Tap any 3D model on the floor to adjust rotation, scale, lock its position, or drag it.
                 </p>
               </div>
             ) : (
@@ -277,6 +329,20 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
                   </div>
 
                   <div className="flex items-center gap-1.5">
+                    {/* Position Lock Toggle Button */}
+                    <button
+                      onClick={onToggleLockItem}
+                      title={selectedItem.isLocked ? 'Position is locked. Click to allow dragging.' : 'Position is unlocked. Click to freeze.'}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer ${
+                        selectedItem.isLocked
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+                      }`}
+                    >
+                      {selectedItem.isLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                      <span>{selectedItem.isLocked ? 'Position Locked' : 'Unlocked (Can Drag)'}</span>
+                    </button>
+
                     <button
                       onClick={onDuplicateItem}
                       title="Duplicate item"
@@ -411,7 +477,7 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
         {/* Tab 3: Environment & AR Settings */}
         {activeTab === 'environment' && (
           <div className="p-3 grid grid-cols-1 md:grid-cols-3 gap-3">
-            {/* View Mode Toggle */}
+            {/* View Mode & Surface Calibration */}
             <div className="bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-800/80 flex flex-col justify-between">
               <div>
                 <span className="text-xs font-semibold text-zinc-200 block mb-1">Visualization Mode</span>
@@ -441,20 +507,24 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
               </button>
             </div>
 
-            {/* Grid & Lighting */}
+            {/* Floor Plane Height Calibration & Lighting */}
             <div className="bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-800/80 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-zinc-300 flex items-center gap-1.5">
-                  <Grid className="w-3.5 h-3.5 text-cyan-400" /> Floor Surface Grid
-                </span>
-                <button
-                  onClick={onToggleGrid}
-                  className={`px-2.5 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
-                    showGrid ? 'bg-cyan-500/20 text-cyan-300' : 'bg-zinc-800 text-zinc-400'
-                  }`}
-                >
-                  {showGrid ? 'Visible' : 'Hidden'}
-                </button>
+              <div>
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <span className="text-zinc-300 flex items-center gap-1.5">
+                    <Grid className="w-3.5 h-3.5 text-cyan-400" /> Floor Level Offset
+                  </span>
+                  <span className="font-mono text-zinc-300">{floorElevation.toFixed(2)}m</span>
+                </div>
+                <input
+                  type="range"
+                  min="-0.4"
+                  max="0.4"
+                  step="0.02"
+                  value={floorElevation}
+                  onChange={(e) => onFloorElevationChange(Number(e.target.value))}
+                  className="w-full accent-cyan-400 h-1.5 bg-zinc-700 rounded-lg cursor-pointer"
+                />
               </div>
 
               <div>

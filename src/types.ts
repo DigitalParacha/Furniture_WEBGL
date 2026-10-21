@@ -32,8 +32,11 @@ export interface PlacedFurniture {
   colorHex?: string;
   dimensions: { width: number; depth: number; height: number };
   isCustomGlb?: boolean;
+  isLocked?: boolean; // When locked, cannot be dragged
 }
 
 export type ViewMode = 'ar-camera' | 'studio-room';
+
+export type PlaneDetectionState = 'scanning' | 'detected' | 'locked';
 
 export type ActiveTab = 'catalog' | 'edit' | 'environment';

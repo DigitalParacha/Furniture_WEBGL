@@ -26,6 +26,8 @@ interface TopHeaderProps {
   cameraStatus: CameraStatus;
   itemsCount: number;
   fps: number;
+  planeState: 'scanning' | 'detected' | 'locked';
+  groundDistance: number;
   hasTorch: boolean;
   isTorchOn: boolean;
   onToggleTorch: () => void;
@@ -41,6 +43,8 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   cameraStatus,
   itemsCount,
   fps,
+  planeState,
+  groundDistance,
   hasTorch,
   isTorchOn,
   onToggleTorch,
@@ -89,8 +93,17 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
 
         {/* Tracking status */}
         <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-900/90 border border-zinc-800/80 text-[11px] font-medium text-zinc-300 backdrop-blur-md">
-          <span className="w-2 h-2 rounded-full bg-sky-400" />
-          <span>Surface Plane Locked</span>
+          {planeState === 'locked' ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-cyan-400" />
+              <span>Ground Locked ({groundDistance}m)</span>
+            </>
+          ) : (
+            <>
+              <span className="w-2 h-2 rounded-full bg-amber-400" />
+              <span>Scanning Floor...</span>
+            </>
+          )}
         </div>
 
         {/* Item count */}
