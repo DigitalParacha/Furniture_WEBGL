@@ -12,6 +12,36 @@ export interface SceneManagerCallbacks {
   onItemMoved?: (item: PlacedFurniture) => void;
   onFpsUpdate?: (fps: number) => void;
   onPlaneStateChange?: (state: PlaneDetectionState, distanceMeters: number) => void;
+  onWebXRSupported?: (supported: boolean) => void;
+}
+
+// Procedural ARCore-style dotted plane texture
+function createARCorePlaneTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+
+  ctx.fillStyle = 'rgba(6, 182, 212, 0.04)';
+  ctx.fillRect(0, 0, 128, 128);
+
+  // Subtle grid lines
+  ctx.strokeStyle = 'rgba(6, 182, 212, 0.18)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0, 0, 128, 128);
+
+  // ARCore circular center dot
+  ctx.fillStyle = 'rgba(56, 189, 248, 0.65)';
+  ctx.beginPath();
+  ctx.arc(64, 64, 3.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(16, 16);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 export class ARSceneManager {
@@ -21,22 +51,27 @@ export class ARSceneManager {
   public renderer: THREE.WebGLRenderer;
   private pmremGenerator: THREE.PMREMGenerator;
 
-  // Scene elements
+  // Lights & Environment
   private keyLight!: THREE.DirectionalLight;
   private hemiLight!: THREE.HemisphereLight;
   private shadowPlane!: THREE.Mesh;
   private floorGrid!: THREE.GridHelper;
   private reticleGroup!: THREE.Group;
-  private reticleTextPlane!: THREE.Mesh;
   private selectionRing!: THREE.Group;
   private featurePointsCloud!: THREE.Points;
+
+  // ARCore-style Detected Floor Plane Visualization
+  public detectedPlaneMesh!: THREE.Mesh;
+  public detectedPlaneRing!: THREE.Mesh;
+  public floorConfirmed: boolean = false;
+  private planeScanProgress: number = 0.2; // expands as floor is scanned
 
   // Ground Plane Tracking
   public groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // Y = 0
   public planeState: PlaneDetectionState = 'scanning';
-  public lastGroundHit = new THREE.Vector3(0, 0, -1.5);
-  public groundDistance = 1.5;
-  public floorElevation = 0; // Adjustable floor height
+  public lastGroundHit = new THREE.Vector3(0, 0, -1.8);
+  public groundDistance = 1.8;
+  public floorElevation = 0;
 
   // Placed objects
   public placedItems: Map<string, PlacedFurniture> = new Map();
@@ -52,18 +87,22 @@ export class ARSceneManager {
   private pointerDownPos = new THREE.Vector2();
   private pointerDownTime = 0;
 
-  // AR Camera Look (First-Person Perspective from Eye Height ~1.45m)
-  // The camera DOES NOT orbit around furniture in AR mode. It turns in place,
-  // so placed furniture remains 100% frozen in physical world space!
+  // AR Camera Look
   public eyeHeight = 1.45;
-  private cameraLook = { yaw: 0, pitch: -0.38 }; // looking slightly downward at floor
+  private cameraLook = { yaw: 0, pitch: -0.38 };
   private isLooking = false;
   private lookStart = { x: 0, y: 0 };
 
-  // Device orientation / Gyroscope state
+  // Gyroscope / Device orientation
   public useGyroscope = false;
   private gyroEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   private gyroQuat = new THREE.Quaternion();
+
+  // WebXR ARCore Hit-Testing
+  public isWebXRSupported = false;
+  public isWebXRActive = false;
+  private xrHitTestSource: any = null;
+  private xrRefSpace: any = null;
 
   // Loop & Lifecycle
   private animFrameId: number | null = null;
@@ -84,7 +123,7 @@ export class ARSceneManager {
     // 1. Scene
     this.scene = new THREE.Scene();
 
-    // 2. Camera: position at eye level (0, 1.45m, 0)
+    // 2. Camera at eye level
     const aspect = container.clientWidth / Math.max(container.clientHeight, 1);
     this.camera = new THREE.PerspectiveCamera(58, aspect, 0.05, 50);
     this.camera.position.set(0, this.eyeHeight, 0);
@@ -105,9 +144,12 @@ export class ARSceneManager {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
+    // Enable WebXR support on renderer
+    this.renderer.xr.enabled = true;
+
     container.appendChild(this.renderer.domElement);
 
-    // 4. Studio Environment for crisp reflections
+    // 4. Studio Environment
     this.pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.pmremGenerator.compileEquirectangularShader();
     const envTexture = this.pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
@@ -116,29 +158,30 @@ export class ARSceneManager {
     // 5. Lights
     this.setupLighting();
 
-    // 6. Ground Shadow Plane, Feature Points & Grid
+    // 6. Ground Shadow Plane, Feature Points & ARCore Detected Plane
     this.setupGround();
 
-    // 7. AR Holographic Reticle (Floor Target Indicator)
+    // 7. AR Holographic Reticle
     this.setupReticle();
 
-    // 8. Selection Ring Gizmo
+    // 8. Selection Ring
     this.setupSelectionRing();
 
-    // 9. Event Listeners
+    // 9. Check WebXR Hardware ARCore Support
+    this.checkWebXRSupport();
+
+    // 10. Event Listeners
     this.bindEvents();
 
-    // 10. Start Animation Loop
+    // 11. Start Animation Loop
     this.animate();
   }
 
   private setupLighting(): void {
-    // Ambient hemisphere light
     this.hemiLight = new THREE.HemisphereLight(0xfff8ed, 0x3f3f46, 0.95);
     this.hemiLight.position.set(0, 10, 0);
     this.scene.add(this.hemiLight);
 
-    // Key directional light with soft shadow mapping
     this.keyLight = new THREE.DirectionalLight(0xfff6ea, 1.4);
     this.keyLight.position.set(3, 6, 2);
     this.keyLight.castShadow = true;
@@ -155,14 +198,13 @@ export class ARSceneManager {
     this.keyLight.shadow.normalBias = 0.02;
     this.scene.add(this.keyLight);
 
-    // Soft fill light
     const fillLight = new THREE.DirectionalLight(0xdce7f0, 0.5);
     fillLight.position.set(-3, 4, -3);
     this.scene.add(fillLight);
   }
 
   private setupGround(): void {
-    // Shadow receiver plane on the floor
+    // 1. Invisible Shadow Receiver Plane on Floor
     const shadowGeo = new THREE.PlaneGeometry(40, 40);
     const shadowMat = new THREE.ShadowMaterial({
       opacity: 0.38,
@@ -175,30 +217,61 @@ export class ARSceneManager {
     this.shadowPlane.receiveShadow = true;
     this.scene.add(this.shadowPlane);
 
-    // Floor surface grid for alignment and visual plane anchoring
+    // 2. ARCore-style Detected Floor Plane Mesh (visualizing detected physical floor polygon)
+    const planeTex = createARCorePlaneTexture();
+    const planeGeo = new THREE.CircleGeometry(3.6, 64);
+    const planeMat = new THREE.MeshBasicMaterial({
+      map: planeTex,
+      transparent: true,
+      opacity: 0.75,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    this.detectedPlaneMesh = new THREE.Mesh(planeGeo, planeMat);
+    this.detectedPlaneMesh.rotation.x = -Math.PI / 2;
+    this.detectedPlaneMesh.position.set(0, this.floorElevation + 0.001, -2.0);
+    this.detectedPlaneMesh.scale.setScalar(this.planeScanProgress);
+    this.scene.add(this.detectedPlaneMesh);
+
+    // 3. Glowing Perimeter Ring around detected floor boundary
+    const ringGeo = new THREE.RingGeometry(3.55, 3.6, 64);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x06b6d4,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    this.detectedPlaneRing = new THREE.Mesh(ringGeo, ringMat);
+    this.detectedPlaneRing.rotation.x = -Math.PI / 2;
+    this.detectedPlaneRing.position.set(0, this.floorElevation + 0.002, -2.0);
+    this.detectedPlaneRing.scale.setScalar(this.planeScanProgress);
+    this.scene.add(this.detectedPlaneRing);
+
+    // 4. Floor Grid Helper
     this.floorGrid = new THREE.GridHelper(16, 32, 0x06b6d4, 0x3f3f46);
     this.floorGrid.position.y = this.floorElevation + 0.001;
     (this.floorGrid.material as THREE.Material).transparent = true;
     (this.floorGrid.material as THREE.Material).opacity = 0.35;
     this.scene.add(this.floorGrid);
 
-    // Ground Plane Feature Points (Simulated AR SLAM point cloud)
-    const pointsCount = 180;
+    // 5. Ground Plane Feature Points (Simulated AR SLAM point cloud)
+    const pointsCount = 200;
     const pointPositions = new Float32Array(pointsCount * 3);
     for (let i = 0; i < pointsCount; i++) {
-      const radius = 0.8 + Math.random() * 4.5;
+      const radius = 0.5 + Math.random() * 4.0;
       const angle = Math.random() * Math.PI * 2;
       pointPositions[i * 3] = Math.cos(angle) * radius;
       pointPositions[i * 3 + 1] = this.floorElevation + (Math.random() - 0.5) * 0.01;
-      pointPositions[i * 3 + 2] = -Math.sin(angle) * radius;
+      pointPositions[i * 3 + 2] = -2.0 - Math.sin(angle) * radius;
     }
     const pointGeo = new THREE.BufferGeometry();
     pointGeo.setAttribute('position', new THREE.BufferAttribute(pointPositions, 3));
     const pointMat = new THREE.PointsMaterial({
       color: 0x38bdf8,
-      size: 0.035,
+      size: 0.04,
       transparent: true,
-      opacity: 0.6,
+      opacity: 0.7,
       depthWrite: false,
     });
     this.featurePointsCloud = new THREE.Points(pointGeo, pointMat);
@@ -209,7 +282,7 @@ export class ARSceneManager {
     this.reticleGroup = new THREE.Group();
     this.reticleGroup.name = 'AR_Ground_Reticle';
 
-    // 1. Outer target ring
+    // Outer target ring
     const ringGeo = new THREE.RingGeometry(0.22, 0.26, 36);
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0x06b6d4,
@@ -222,7 +295,7 @@ export class ARSceneManager {
     ring.rotation.x = -Math.PI / 2;
     this.reticleGroup.add(ring);
 
-    // 2. Inner pulsating locator ring
+    // Inner pulsating locator ring
     const innerRingGeo = new THREE.RingGeometry(0.08, 0.1, 24);
     const innerRingMat = new THREE.MeshBasicMaterial({
       color: 0x38bdf8,
@@ -235,7 +308,7 @@ export class ARSceneManager {
     innerRing.rotation.x = -Math.PI / 2;
     this.reticleGroup.add(innerRing);
 
-    // 3. Center dot
+    // Center dot
     const dotGeo = new THREE.CircleGeometry(0.025, 16);
     const dotMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
@@ -248,7 +321,7 @@ export class ARSceneManager {
     dot.rotation.x = -Math.PI / 2;
     this.reticleGroup.add(dot);
 
-    // 4. Four directional tick marks
+    // Four directional tick marks
     const armGeo = new THREE.PlaneGeometry(0.012, 0.09);
     const armMat = new THREE.MeshBasicMaterial({
       color: 0x06b6d4,
@@ -273,7 +346,6 @@ export class ARSceneManager {
     this.selectionRing = new THREE.Group();
     this.selectionRing.visible = false;
 
-    // Glowing selection ring around base
     const ringGeo = new THREE.RingGeometry(0.68, 0.74, 48);
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0x38bdf8,
@@ -286,7 +358,6 @@ export class ARSceneManager {
     ring.rotation.x = -Math.PI / 2;
     this.selectionRing.add(ring);
 
-    // Forward direction indicator arrow
     const arrowGeo = new THREE.ConeGeometry(0.08, 0.16, 16);
     const arrowMat = new THREE.MeshBasicMaterial({
       color: 0x38bdf8,
@@ -301,7 +372,53 @@ export class ARSceneManager {
     this.scene.add(this.selectionRing);
   }
 
-  // First-person camera look calculation (turns camera in place at eye height)
+  // Check if device supports hardware ARCore WebXR
+  private async checkWebXRSupport(): Promise<void> {
+    if (typeof navigator !== 'undefined' && 'xr' in navigator && (navigator as any).xr?.isSessionSupported) {
+      try {
+        const supported = await (navigator as any).xr.isSessionSupported('immersive-ar');
+        this.isWebXRSupported = Boolean(supported);
+        this.callbacks.onWebXRSupported?.(this.isWebXRSupported);
+      } catch (e) {
+        console.warn('WebXR check failed:', e);
+      }
+    }
+  }
+
+  // Start Hardware ARCore Session with WebXR Hit Test
+  public async startWebXRSession(): Promise<boolean> {
+    if (!this.isWebXRSupported || typeof navigator === 'undefined' || !(navigator as any).xr) {
+      return false;
+    }
+
+    try {
+      const session = await (navigator as any).xr.requestSession('immersive-ar', {
+        requiredFeatures: ['hit-test'],
+        optionalFeatures: ['dom-overlay', 'plane-detection'],
+        domOverlay: { root: document.body },
+      });
+
+      this.isWebXRActive = true;
+      this.renderer.xr.setSession(session);
+
+      this.xrRefSpace = await session.requestReferenceSpace('local');
+      const viewerSpace = await session.requestReferenceSpace('viewer');
+      this.xrHitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+
+      session.addEventListener('end', () => {
+        this.isWebXRActive = false;
+        this.xrHitTestSource = null;
+        this.xrRefSpace = null;
+      });
+
+      return true;
+    } catch (err) {
+      console.warn('WebXR start error:', err);
+      return false;
+    }
+  }
+
+  // Camera look rotation
   private updateCameraRotation(): void {
     if (this.useGyroscope) {
       this.camera.quaternion.copy(this.gyroQuat);
@@ -315,7 +432,31 @@ export class ARSceneManager {
     this.groundPlane.set(new THREE.Vector3(0, 1, 0), -elev);
     this.shadowPlane.position.y = elev;
     this.floorGrid.position.y = elev + 0.001;
+    this.detectedPlaneMesh.position.y = elev + 0.001;
+    this.detectedPlaneRing.position.y = elev + 0.002;
     this.featurePointsCloud.position.y = elev;
+  }
+
+  public confirmFloor(): void {
+    this.floorConfirmed = true;
+    this.planeState = 'locked';
+    // Center detected plane at current reticle position
+    this.detectedPlaneMesh.position.x = this.reticleGroup.position.x;
+    this.detectedPlaneMesh.position.z = this.reticleGroup.position.z;
+    this.detectedPlaneRing.position.x = this.reticleGroup.position.x;
+    this.detectedPlaneRing.position.z = this.reticleGroup.position.z;
+    this.detectedPlaneMesh.scale.setScalar(1.0);
+    this.detectedPlaneRing.scale.setScalar(1.0);
+    this.callbacks.onPlaneStateChange?.('locked', this.groundDistance);
+  }
+
+  public rescanFloor(): void {
+    this.floorConfirmed = false;
+    this.planeScanProgress = 0.2;
+    this.planeState = 'scanning';
+    this.detectedPlaneMesh.scale.setScalar(this.planeScanProgress);
+    this.detectedPlaneRing.scale.setScalar(this.planeScanProgress);
+    this.callbacks.onPlaneStateChange?.('scanning', 0);
   }
 
   public updateDimensions(): void {
@@ -336,6 +477,8 @@ export class ARSceneManager {
   public setGridVisible(visible: boolean): void {
     this.showGrid = visible;
     this.floorGrid.visible = visible;
+    this.detectedPlaneMesh.visible = visible;
+    this.detectedPlaneRing.visible = visible;
     this.featurePointsCloud.visible = visible;
   }
 
@@ -344,32 +487,28 @@ export class ARSceneManager {
     if (mode === 'studio-room') {
       this.scene.background = new THREE.Color(0x121316);
     } else {
-      this.scene.background = null; // transparent to show live camera
+      this.scene.background = null; // transparent for camera
     }
   }
 
-  // Device orientation / Motion sensor updater
   public setDeviceOrientation(alpha: number, beta: number, gamma: number): void {
     this.useGyroscope = true;
-
-    // Convert degrees to radians and construct quaternion
     const degToRad = Math.PI / 180;
-    const _x = beta ? beta * degToRad : 0; // pitch
-    const _y = alpha ? alpha * degToRad : 0; // yaw
-    const _z = gamma ? -gamma * degToRad : 0; // roll
+    const _x = beta ? beta * degToRad : 0;
+    const _y = alpha ? alpha * degToRad : 0;
+    const _z = gamma ? -gamma * degToRad : 0;
 
     this.gyroEuler.set(_x, _y, _z, 'YXZ');
     this.gyroQuat.setFromEuler(this.gyroEuler);
     this.updateCameraRotation();
   }
 
-  // Reticle positioning: projects center of camera to horizontal ground plane
   public getReticlePosition(): THREE.Vector3 {
     return this.reticleGroup.position.clone();
   }
 
   private updateGroundPlaneDetection(): void {
-    // Cast ray from center of camera (NDC 0, -0.15 looking slightly down)
+    // Cast ray from center of camera (NDC 0, -0.15)
     this.raycaster.setFromCamera(new THREE.Vector2(0, -0.15), this.camera);
     const hitPoint = new THREE.Vector3();
     const hit = this.raycaster.ray.intersectPlane(this.groundPlane, hitPoint);
@@ -377,31 +516,45 @@ export class ARSceneManager {
     if (hit) {
       const dist = hitPoint.distanceTo(this.camera.position);
 
-      // Valid ground plane intersection if ahead of camera and within realistic room distance (0.4m to 7.0m)
       if (dist >= 0.4 && dist <= 7.0) {
         this.reticleGroup.visible = true;
         this.reticleGroup.position.lerp(
           new THREE.Vector3(hitPoint.x, this.floorElevation + 0.002, hitPoint.z),
-          0.3
+          0.35
         );
         this.reticleGroup.rotation.y += 0.015;
 
         this.lastGroundHit.copy(this.reticleGroup.position);
         this.groundDistance = Number(dist.toFixed(1));
 
-        if (this.planeState !== 'locked') {
-          this.planeState = 'locked';
-          this.callbacks.onPlaneStateChange?.('locked', this.groundDistance);
+        // Expand detected plane as the floor is successfully scanned
+        if (!this.floorConfirmed) {
+          if (this.planeScanProgress < 1.0) {
+            this.planeScanProgress = Math.min(1.0, this.planeScanProgress + 0.015);
+            this.detectedPlaneMesh.scale.setScalar(this.planeScanProgress);
+            this.detectedPlaneRing.scale.setScalar(this.planeScanProgress);
+            this.detectedPlaneMesh.position.x = hitPoint.x;
+            this.detectedPlaneMesh.position.z = hitPoint.z;
+            this.detectedPlaneRing.position.x = hitPoint.x;
+            this.detectedPlaneRing.position.z = hitPoint.z;
+          }
+
+          if (this.planeState !== 'locked') {
+            this.planeState = 'locked';
+            this.callbacks.onPlaneStateChange?.('locked', this.groundDistance);
+          }
         }
         return;
       }
     }
 
-    // Camera pointing upwards away from floor
-    this.reticleGroup.visible = false;
-    if (this.planeState !== 'scanning') {
-      this.planeState = 'scanning';
-      this.callbacks.onPlaneStateChange?.('scanning', 0);
+    // Camera pointing away from floor
+    if (!this.floorConfirmed) {
+      this.reticleGroup.visible = false;
+      if (this.planeState !== 'scanning') {
+        this.planeState = 'scanning';
+        this.callbacks.onPlaneStateChange?.('scanning', 0);
+      }
     }
   }
 
@@ -422,7 +575,6 @@ export class ARSceneManager {
     },
     spawnPosition?: THREE.Vector3
   ): PlacedFurniture {
-    // Determine position: explicitly provided or at current detected floor reticle
     const position = spawnPosition ? spawnPosition.clone() : this.getReticlePosition();
     position.y = this.floorElevation;
 
@@ -431,7 +583,6 @@ export class ARSceneManager {
     group.rotation.y = 0;
     group.userData = { instanceId: itemData.instanceId };
 
-    // Add to 3D scene (locked in world coordinates)
     this.scene.add(group);
 
     const placed: PlacedFurniture = {
@@ -464,7 +615,6 @@ export class ARSceneManager {
       this.selectionRing.position.set(item.position.x, this.floorElevation + 0.003, item.position.z);
       this.selectionRing.rotation.y = item.rotationY;
 
-      // Adjust ring radius according to model size
       const maxRadius = Math.max(item.dimensions.width, item.dimensions.depth) * 0.65 * item.scale;
       this.selectionRing.scale.set(maxRadius, maxRadius, maxRadius);
     } else {
@@ -513,7 +663,6 @@ export class ARSceneManager {
     item.scale = scaleFactor;
     item.object3D.scale.setScalar(scaleFactor);
 
-    // Update ring size
     const maxRadius = Math.max(item.dimensions.width, item.dimensions.depth) * 0.65 * scaleFactor;
     this.selectionRing.scale.set(maxRadius, maxRadius, maxRadius);
 
@@ -549,7 +698,7 @@ export class ARSceneManager {
   }
 
   // ----------------------------------------------------
-  // Pointer & Touch Events (Drag on Floor vs Look Around)
+  // Pointer & Touch Events
   // ----------------------------------------------------
 
   private bindEvents(): void {
@@ -568,13 +717,12 @@ export class ARSceneManager {
     this.pointerDownPos.set(e.clientX, e.clientY);
     this.pointerDownTime = performance.now();
 
-    // Raycast strictly against placed furniture models
+    // Raycast against placed furniture models
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const objectGroups = Array.from(this.placedItems.values()).map((p) => p.object3D);
     const intersects = this.raycaster.intersectObjects(objectGroups, true);
 
     if (intersects.length > 0) {
-      // Find parent group with instanceId
       let hitObj: THREE.Object3D | null = intersects[0].object;
       while (hitObj && !hitObj.userData?.instanceId && hitObj.parent && hitObj.parent !== this.scene) {
         hitObj = hitObj.parent;
@@ -586,7 +734,6 @@ export class ARSceneManager {
 
         this.selectItem(id);
 
-        // Only allow dragging if the item is NOT locked!
         if (item && !item.isLocked) {
           this.isDragging = true;
           this.dragTarget = hitObj as THREE.Group;
@@ -601,7 +748,7 @@ export class ARSceneManager {
       }
     }
 
-    // Clicked empty room space: look around (turn head in place)
+    // Dragging empty space: rotate camera view in place
     this.isLooking = true;
     this.lookStart = { x: e.clientX, y: e.clientY };
   }
@@ -611,7 +758,7 @@ export class ARSceneManager {
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
-    // 1. Moving a dragged furniture item along the floor plane
+    // Dragging furniture
     if (this.isDragging && this.dragTarget) {
       this.raycaster.setFromCamera(this.pointer, this.camera);
       const planeIntersect = new THREE.Vector3();
@@ -620,7 +767,6 @@ export class ARSceneManager {
         this.dragTarget.position.x = newPos.x;
         this.dragTarget.position.z = newPos.z;
 
-        // Keep selection ring pinned
         this.selectionRing.position.x = newPos.x;
         this.selectionRing.position.z = newPos.z;
 
@@ -635,13 +781,12 @@ export class ARSceneManager {
       return;
     }
 
-    // 2. Turning head / looking around in room (turns camera in place, furniture stays FROZEN in world)
+    // Looking around in room
     if (this.isLooking && !this.useGyroscope) {
       const dx = e.clientX - this.lookStart.x;
       const dy = e.clientY - this.lookStart.y;
       this.lookStart = { x: e.clientX, y: e.clientY };
 
-      // Yaw (horizontal turn) & Pitch (vertical tilt)
       this.cameraLook.yaw -= dx * 0.005;
       this.cameraLook.pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.5, this.cameraLook.pitch - dy * 0.005));
       this.updateCameraRotation();
@@ -652,7 +797,6 @@ export class ARSceneManager {
     const dist = Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y);
     const duration = performance.now() - this.pointerDownTime;
 
-    // Quick tap on empty background deselects current furniture
     if (dist < 5 && duration < 300 && !this.isDragging) {
       this.selectItem(null);
     }
@@ -663,13 +807,11 @@ export class ARSceneManager {
   }
 
   private onWheel(e: WheelEvent): void {
-    // Slight height or pitch adjustment
     e.preventDefault();
     this.cameraLook.pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.5, this.cameraLook.pitch - e.deltaY * 0.001));
     this.updateCameraRotation();
   }
 
-  // Reset camera look to default forward-downward glance
   public resetCamera(): void {
     this.camera.position.set(0, this.eyeHeight, 0);
     this.cameraLook = { yaw: 0, pitch: -0.38 };
@@ -677,7 +819,6 @@ export class ARSceneManager {
     this.updateCameraRotation();
   }
 
-  // Composite snapshot capture: camera feed + 3D canvas
   public captureSnapshot(videoElement?: HTMLVideoElement | null): string {
     const width = this.renderer.domElement.width;
     const height = this.renderer.domElement.height;
@@ -687,7 +828,6 @@ export class ARSceneManager {
     captureCanvas.height = height;
     const ctx = captureCanvas.getContext('2d')!;
 
-    // 1. Draw live camera video if available
     if (this.viewMode === 'ar-camera' && videoElement && videoElement.readyState >= 2) {
       const vRatio = videoElement.videoWidth / videoElement.videoHeight;
       const cRatio = width / height;
@@ -706,7 +846,6 @@ export class ARSceneManager {
 
       ctx.drawImage(videoElement, sx, sy, sWidth, sHeight);
     } else {
-      // Studio background
       const grad = ctx.createLinearGradient(0, 0, 0, height);
       grad.addColorStop(0, '#18181b');
       grad.addColorStop(1, '#09090b');
@@ -714,11 +853,9 @@ export class ARSceneManager {
       ctx.fillRect(0, 0, width, height);
     }
 
-    // 2. Draw 3D scene canvas
     this.renderer.render(this.scene, this.camera);
     ctx.drawImage(this.renderer.domElement, 0, 0, width, height);
 
-    // 3. Awgzo WebAR Watermark Badge
     ctx.font = '600 16px "Plus Jakarta Sans", sans-serif';
     ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
     ctx.fillRect(24, height - 52, 205, 36);
@@ -731,15 +868,39 @@ export class ARSceneManager {
     return captureCanvas.toDataURL('image/jpeg', 0.92);
   }
 
-  // Main Render Loop
-  private animate = (): void => {
+  // Animation Loop with WebXR Frame Support
+  private animate = (timestamp?: number, frame?: any): void => {
     if (this.isDisposed) return;
-    this.animFrameId = requestAnimationFrame(this.animate);
 
-    // Update Ground Plane Detection & Reticle
-    this.updateGroundPlaneDetection();
+    if (this.renderer.xr.isPresenting) {
+      this.renderer.setAnimationLoop(this.animate);
+    } else {
+      this.animFrameId = requestAnimationFrame(this.animate);
+    }
 
-    // Pulse selection ring opacity slightly
+    // Hardware ARCore WebXR hit testing
+    if (frame && this.xrHitTestSource && this.xrRefSpace) {
+      const hitTestResults = frame.getHitTestResults(this.xrHitTestSource);
+      if (hitTestResults.length > 0) {
+        const hit = hitTestResults[0];
+        const pose = hit.getPose(this.xrRefSpace);
+        if (pose) {
+          this.reticleGroup.visible = true;
+          this.reticleGroup.matrix.fromArray(pose.transform.matrix);
+          this.reticleGroup.matrix.decompose(
+            this.reticleGroup.position,
+            this.reticleGroup.quaternion,
+            this.reticleGroup.scale
+          );
+          this.planeState = 'locked';
+        }
+      }
+    } else {
+      // Sensor & camera ground plane detection
+      this.updateGroundPlaneDetection();
+    }
+
+    // Selection ring pulse
     if (this.selectionRing.visible) {
       const ringMesh = this.selectionRing.children[0] as THREE.Mesh;
       if (ringMesh && (ringMesh.material as THREE.Material).opacity !== undefined) {
@@ -747,16 +908,15 @@ export class ARSceneManager {
       }
     }
 
-    // Pulse feature points cloud slightly
+    // Feature points pulse
     if (this.featurePointsCloud.visible) {
       (this.featurePointsCloud.material as THREE.PointsMaterial).opacity =
         0.4 + Math.sin(performance.now() * 0.003) * 0.15;
     }
 
-    // Render 3D scene
+    // Render scene
     this.renderer.render(this.scene, this.camera);
 
-    // FPS counter calculation
     this.frameCount++;
     const now = performance.now();
     if (now - this.fpsTimer >= 1000) {
@@ -772,6 +932,7 @@ export class ARSceneManager {
     if (this.animFrameId !== null) {
       cancelAnimationFrame(this.animFrameId);
     }
+    this.renderer.setAnimationLoop(null);
     this.clearAllItems();
     this.pmremGenerator.dispose();
     this.renderer.dispose();

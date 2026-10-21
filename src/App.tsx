@@ -15,6 +15,7 @@ import { CustomGlbModal } from './components/CustomGlbModal.tsx';
 import { SnapshotModal } from './components/SnapshotModal.tsx';
 import { GuideModal } from './components/GuideModal.tsx';
 import { MobileQrModal } from './components/MobileQrModal.tsx';
+import { FloorScannerOverlay } from './components/FloorScannerOverlay.tsx';
 import { INITIAL_CATALOG, instantiateModel } from './models/catalog.ts';
 import { FurnitureModelDef, PlacedFurniture, ViewMode, ActiveTab, PlaneDetectionState } from './types.ts';
 import { applyColorToModel } from './models/glbLoader.ts';
@@ -48,6 +49,8 @@ export default function App() {
   const [floorElevation, setFloorElevation] = useState<number>(0);
   const [planeState, setPlaneState] = useState<PlaneDetectionState>('scanning');
   const [groundDistance, setGroundDistance] = useState<number>(1.8);
+  const [floorConfirmed, setFloorConfirmed] = useState<boolean>(false);
+  const [isWebXRSupported, setIsWebXRSupported] = useState<boolean>(false);
   const [fps, setFps] = useState<number>(60);
   const [activeTab, setActiveTab] = useState<ActiveTab>('catalog');
 
@@ -77,6 +80,9 @@ export default function App() {
         setPlaneState(state);
         setGroundDistance(dist);
       },
+      onWebXRSupported: (supported) => {
+        setIsWebXRSupported(supported);
+      },
       onFpsUpdate: (currentFps) => {
         setFps(currentFps);
       },
@@ -91,24 +97,6 @@ export default function App() {
       }
     };
     window.addEventListener('deviceorientation', handleOrientation);
-
-    // Initial reference furniture placed in front on detected floor
-    const defaultSofaDef = INITIAL_CATALOG.find((m) => m.id === 'sofa-modern-3seat')!;
-    const sofaInstance = instantiateModel(defaultSofaDef);
-    manager.addFurniture(
-      {
-        instanceId: `sofa-${Date.now()}`,
-        modelId: defaultSofaDef.id,
-        name: defaultSofaDef.name,
-        object3D: sofaInstance.object3D,
-        dimensions: sofaInstance.dimensions,
-        colorHex: '#262a30',
-        isLocked: false,
-      },
-      new THREE.Vector3(0, 0, -2.0)
-    );
-
-    setPlacedItemsCount(manager.placedItems.size);
 
     // Window resize
     const handleResize = () => {
@@ -153,11 +141,30 @@ export default function App() {
     setActiveCatalogModel(modelDef);
   }, []);
 
+  // Floor Confirmation Handlers
+  const handleConfirmFloor = useCallback(() => {
+    sceneManagerRef.current?.confirmFloor();
+    setFloorConfirmed(true);
+    setActiveTab('catalog');
+    if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+      navigator.vibrate?.(50);
+    }
+  }, []);
+
+  const handleRescanFloor = useCallback(() => {
+    sceneManagerRef.current?.rescanFloor();
+    setFloorConfirmed(false);
+  }, []);
+
   // Place model at currently detected ground plane reticle
   const handlePlaceAtReticle = useCallback(() => {
     if (!sceneManagerRef.current || !activeCatalogModel) return;
 
-    // Haptic feedback if supported
+    // Ensure floor is confirmed upon placing
+    if (!floorConfirmed) {
+      handleConfirmFloor();
+    }
+
     if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
       navigator.vibrate?.(35);
     }
@@ -180,35 +187,39 @@ export default function App() {
     setPlacedItemsCount(sceneManagerRef.current.placedItems.size);
     setSelectedItem({ ...placed });
     setActiveTab('edit');
-  }, [activeCatalogModel]);
+  }, [activeCatalogModel, floorConfirmed, handleConfirmFloor]);
 
-  const handleCustomGlbLoaded = useCallback((modelDef: FurnitureModelDef, object3D: THREE.Group) => {
-    // Cache the root template group for future cloning
-    customGlbCacheRef.current.set(modelDef.id, object3D);
+  const handleCustomGlbLoaded = useCallback(
+    (modelDef: FurnitureModelDef, object3D: THREE.Group) => {
+      customGlbCacheRef.current.set(modelDef.id, object3D);
 
-    // Add to local catalog state
-    setCatalog((prev) => [modelDef, ...prev]);
-    setActiveCatalogModel(modelDef);
+      setCatalog((prev) => [modelDef, ...prev]);
+      setActiveCatalogModel(modelDef);
 
-    // Place into current scene immediately at floor reticle
-    if (sceneManagerRef.current) {
-      const instance = instantiateModel(modelDef, object3D);
-      const placed = sceneManagerRef.current.addFurniture({
-        instanceId: `${modelDef.id}-${Date.now()}`,
-        modelId: modelDef.id,
-        name: modelDef.name,
-        object3D: instance.object3D,
-        dimensions: instance.dimensions,
-        colorHex: modelDef.colors?.[0]?.hex,
-        isCustomGlb: true,
-        isLocked: false,
-      });
+      if (!floorConfirmed) {
+        handleConfirmFloor();
+      }
 
-      setPlacedItemsCount(sceneManagerRef.current.placedItems.size);
-      setSelectedItem({ ...placed });
-      setActiveTab('edit');
-    }
-  }, []);
+      if (sceneManagerRef.current) {
+        const instance = instantiateModel(modelDef, object3D);
+        const placed = sceneManagerRef.current.addFurniture({
+          instanceId: `${modelDef.id}-${Date.now()}`,
+          modelId: modelDef.id,
+          name: modelDef.name,
+          object3D: instance.object3D,
+          dimensions: instance.dimensions,
+          colorHex: modelDef.colors?.[0]?.hex,
+          isCustomGlb: true,
+          isLocked: false,
+        });
+
+        setPlacedItemsCount(sceneManagerRef.current.placedItems.size);
+        setSelectedItem({ ...placed });
+        setActiveTab('edit');
+      }
+    },
+    [floorConfirmed, handleConfirmFloor]
+  );
 
   const handleRotateDegrees = useCallback((deg: number) => {
     if (!sceneManagerRef.current) return;
@@ -259,7 +270,6 @@ export default function App() {
     const cachedObj = customGlbCacheRef.current.get(modelDef.id);
     const instance = instantiateModel(modelDef, cachedObj, selectedItem.colorHex);
 
-    // Offset slightly from original position on floor
     const offsetPos = selectedItem.position.clone().add(new THREE.Vector3(0.4, 0, 0.4));
 
     const placed = sceneManagerRef.current.addFurniture(
@@ -276,7 +286,6 @@ export default function App() {
       offsetPos
     );
 
-    // Match rotation and scale
     sceneManagerRef.current.updateSelectedItemRotation(selectedItem.rotationY);
     sceneManagerRef.current.updateSelectedItemScale(selectedItem.scale);
 
@@ -311,8 +320,11 @@ export default function App() {
     const nextMode = viewMode === 'ar-camera' ? 'studio-room' : 'ar-camera';
     setViewMode(nextMode);
     sceneManagerRef.current?.setViewMode(nextMode);
-    if (nextMode === 'ar-camera' && cameraStatus !== 'active') {
-      startCamera();
+    if (nextMode === 'ar-camera') {
+      if (cameraStatus !== 'active') startCamera();
+      setFloorConfirmed(false);
+    } else {
+      setFloorConfirmed(true);
     }
   }, [cameraStatus, startCamera, viewMode]);
 
@@ -351,6 +363,7 @@ export default function App() {
         onSwitchToStudio={() => {
           setViewMode('studio-room');
           sceneManagerRef.current?.setViewMode('studio-room');
+          setFloorConfirmed(true);
         }}
       />
 
@@ -378,62 +391,75 @@ export default function App() {
         onOpenGuide={() => setIsGuideOpen(true)}
       />
 
-      {/* 4. Real-time Dimension Overlay for Selected Furniture */}
+      {/* 4. Floor Detection Scanning Workflow Overlay (ARCore-style Step 1) */}
+      {viewMode === 'ar-camera' && (
+        <FloorScannerOverlay
+          planeState={planeState}
+          groundDistance={groundDistance}
+          floorConfirmed={floorConfirmed}
+          onConfirmFloor={handleConfirmFloor}
+          onRescanFloor={handleRescanFloor}
+        />
+      )}
+
+      {/* 5. Real-time Dimension Overlay for Selected Furniture */}
       <DimensionBadge selectedItem={selectedItem} />
 
-      {/* 5. Collapsible Bottom Control Dock with Ground Detection & Instant Place Button */}
-      <BottomControlDock
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        catalog={catalog}
-        selectedItem={selectedItem}
-        viewMode={viewMode}
-        showGrid={showGrid}
-        lightIntensity={lightIntensity}
-        planeState={planeState}
-        groundDistance={groundDistance}
-        floorElevation={floorElevation}
-        activeCatalogModel={activeCatalogModel}
-        onSelectItemToSpawn={handleSelectCatalogItem}
-        onPlaceAtReticle={handlePlaceAtReticle}
-        onOpenGlbModal={() => setIsGlbModalOpen(true)}
-        onRotateDegrees={handleRotateDegrees}
-        onSetRotationRadians={handleSetRotationRadians}
-        onScaleChange={handleScaleChange}
-        onElevationChange={handleElevationChange}
-        onFloorElevationChange={handleFloorElevationChange}
-        onColorChange={handleColorChange}
-        onDuplicateItem={handleDuplicateItem}
-        onDeleteItem={handleDeleteItem}
-        onDeselectItem={handleDeselectItem}
-        onToggleLockItem={handleToggleLockItem}
-        onToggleViewMode={handleToggleViewMode}
-        onToggleGrid={handleToggleGrid}
-        onLightIntensityChange={handleLightIntensityChange}
-        onResetCamera={handleResetCamera}
-        onClearAll={handleClearAll}
-      />
+      {/* 6. Collapsible Bottom Control Dock with Ground Detection & Instant Place Button */}
+      {floorConfirmed && (
+        <BottomControlDock
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          catalog={catalog}
+          selectedItem={selectedItem}
+          viewMode={viewMode}
+          showGrid={showGrid}
+          lightIntensity={lightIntensity}
+          planeState={planeState}
+          groundDistance={groundDistance}
+          floorElevation={floorElevation}
+          activeCatalogModel={activeCatalogModel}
+          onSelectItemToSpawn={handleSelectCatalogItem}
+          onPlaceAtReticle={handlePlaceAtReticle}
+          onOpenGlbModal={() => setIsGlbModalOpen(true)}
+          onRotateDegrees={handleRotateDegrees}
+          onSetRotationRadians={handleSetRotationRadians}
+          onScaleChange={handleScaleChange}
+          onElevationChange={handleElevationChange}
+          onFloorElevationChange={handleFloorElevationChange}
+          onColorChange={handleColorChange}
+          onDuplicateItem={handleDuplicateItem}
+          onDeleteItem={handleDeleteItem}
+          onDeselectItem={handleDeselectItem}
+          onToggleLockItem={handleToggleLockItem}
+          onToggleViewMode={handleToggleViewMode}
+          onToggleGrid={handleToggleGrid}
+          onLightIntensityChange={handleLightIntensityChange}
+          onResetCamera={handleResetCamera}
+          onClearAll={handleClearAll}
+        />
+      )}
 
-      {/* 6. Custom GLB Upload Modal */}
+      {/* 7. Custom GLB Upload Modal */}
       <CustomGlbModal
         isOpen={isGlbModalOpen}
         onClose={() => setIsGlbModalOpen(false)}
         onModelLoaded={handleCustomGlbLoaded}
       />
 
-      {/* 7. Snapshot Photo Modal */}
+      {/* 8. Snapshot Photo Modal */}
       <SnapshotModal
         imageUrl={snapshotUrl}
         onClose={() => setSnapshotUrl(null)}
       />
 
-      {/* 8. Workflow & Instructions Guide Modal */}
+      {/* 9. Workflow & Instructions Guide Modal */}
       <GuideModal
         isOpen={isGuideOpen}
         onClose={() => setIsGuideOpen(false)}
       />
 
-      {/* 9. Test on Mobile & Vercel Guide Modal */}
+      {/* 10. Test on Mobile & Vercel Guide Modal */}
       <MobileQrModal
         isOpen={isMobileQrOpen}
         onClose={() => setIsMobileQrOpen(false)}
