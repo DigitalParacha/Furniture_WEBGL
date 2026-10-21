@@ -1,0 +1,6 @@
+{
+  "name": "Awgzo WebAR - Interior Furniture Visualizer",
+  "description": "Real-time WebAR interior visualizer allowing users to place, drag, rotate, and scale 3D couches, tables, and custom GLB models using the live camera.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
